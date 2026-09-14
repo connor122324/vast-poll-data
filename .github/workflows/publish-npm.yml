@@ -1,0 +1,96 @@
+name: publish-npm
+
+# Publishes data.js to npm as ridgemont-vast-poll@1.<15-min-slot>.0 so the
+# Vast B300 Watch artifact can load it from cdn.jsdelivr.net/npm/ — the only
+# CDN path the artifact sandbox's CSP allows.
+#
+# Uses npm Trusted Publishing (OIDC). There is NO token here and none on the
+# Mac: GitHub mints a short-lived credential per run. This replaces the local
+# `npm publish` in export-data-js.py, whose granular token died on 13 Sep 2026
+# and whose replacement was refused by npm's 2FA-on-write policy.
+
+on:
+  push:
+    branches: [main]
+    paths: ['data.js']
+  workflow_dispatch:
+
+# One publish at a time. Two runs in the same 15-min slot would collide on the
+# version; serialising means the second sees "cannot publish over" and exits 0.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write        # required for Trusted Publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm (Trusted Publishing needs >= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Stage the package
+        id: stage
+        run: |
+          set -euo pipefail
+          SLOT=$(( $(date +%s) / 900 ))
+          VER="1.${SLOT}.0"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          mkdir -p pkg
+          cp data.js pkg/data.js
+          cp README.md pkg/README.md
+          cat > pkg/package.json <<JSON
+          {
+            "name": "ridgemont-vast-poll",
+            "version": "${VER}",
+            "description": "Vast.ai GPU marketplace snapshots (public bundles API) feeding a live dashboard. Market statistics only.",
+            "license": "MIT",
+            "files": ["data.js", "README.md"],
+            "repository": {
+              "type": "git",
+              "url": "git+https://github.com/connor122324/vast-poll-data.git"
+            }
+          }
+          JSON
+          echo "staged $VER — data.js $(wc -c < pkg/data.js) bytes"
+
+      - name: Publish
+        working-directory: pkg
+        run: |
+          set +e
+          OUT=$(npm publish --access public 2>&1); RC=$?
+          echo "$OUT"
+          if [ $RC -ne 0 ]; then
+            # Same slot already published is a no-op, not a failure.
+            if echo "$OUT" | grep -qi "cannot publish over\|previously published"; then
+              echo "::notice::version ${{ steps.stage.outputs.version }} already published this slot — nothing to do"
+              exit 0
+            fi
+            echo "::error::npm publish failed"
+            exit $RC
+          fi
+          echo "::notice::published ${{ steps.stage.outputs.version }}"
+
+      - name: Confirm the CDN can see it
+        run: |
+          set -euo pipefail
+          V="${{ steps.stage.outputs.version }}"
+          for i in $(seq 1 10); do
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' \
+              "https://cdn.jsdelivr.net/npm/ridgemont-vast-poll@${V}/data.js")
+            echo "attempt $i: jsDelivr HTTP $CODE"
+            [ "$CODE" = "200" ] && echo "::notice::jsDelivr serving $V" && exit 0
+            sleep 15
+          done
+          echo "::warning::jsDelivr had not picked up $V within 150s (npm publish itself succeeded)"
