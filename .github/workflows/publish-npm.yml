@@ -10,9 +10,14 @@ name: publish-npm
 # and whose replacement was refused by npm's 2FA-on-write policy.
 
 on:
-  push:
-    branches: [main]
-    paths: ['data.js']
+  # PUSH TRIGGER DISABLED 2026-09-14 at Brian's request.
+  # Every 15-min poll pushes data.js, so until the npm Trusted Publisher is registered
+  # each push produced a failing run and a failure email. Re-enable by deleting the four
+  # '#' marks below — nothing else about this workflow changes.
+  #
+  # push:
+  #   branches: [main]
+  #   paths: ['data.js']
   workflow_dispatch:
 
 # One publish at a time. Two runs in the same 15-min slot would collide on the
